@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PRIME-RL Demonstrator</title>
+<style>
+:root{--bg:#0b1020;--p:#151f38;--p2:#0f172a;--line:#30415f;--tx:#eef4ff;--mut:#aab6d3;--a:#6da8ff;--ok:#39d98a;--w:#ffc857;--bad:#ff6b6b;--purple:#c084fc}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at 15% 0,#17284c 0,transparent 30%),var(--bg);color:var(--tx)}
+.wrap{max-width:1400px;margin:auto;padding:20px}.card{background:linear-gradient(180deg,var(--p),#10182b);border:1px solid var(--line);border-radius:17px;padding:19px;box-shadow:0 14px 36px #0005}
+.hero{display:grid;grid-template-columns:1.5fr .5fr;gap:16px;margin-bottom:16px}.ey{color:var(--a);font-size:12px;font-weight:800;letter-spacing:.14em}.hero h1{font-size:46px;margin:8px 0}.sub,.small{color:var(--mut);line-height:1.5}.rule{margin-top:14px;padding:13px;border-left:4px solid var(--a);background:#6da8ff12;border-radius:9px}
+.state{display:inline-flex;gap:9px;align-items:center;padding:10px 14px;border:1px solid currentColor;border-radius:999px;font-weight:900;letter-spacing:.08em}.dot{width:10px;height:10px;background:currentColor;border-radius:50%;box-shadow:0 0 14px currentColor}
+.idle{color:var(--mut)}.execute{color:var(--ok)}.pause{color:var(--w)}.escalate{color:var(--purple)}.terminate{color:var(--bad)}
+.arch{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:center}.box{background:var(--p2);border:1px solid var(--line);border-radius:12px;padding:15px;text-align:center}.gate{border-color:var(--a)}.arrow{font-size:27px;color:var(--a)}
+.grid3{display:grid;grid-template-columns:1.15fr .9fr .95fr;gap:16px;margin:16px 0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+h2{font-size:20px;margin:0 0 14px}label{display:block;color:var(--mut);font-size:13px;margin-bottom:5px}.field{margin-bottom:11px}
+input,select{width:100%;background:#0b1326;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px}
+.toggle{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid #30415f88}.toggle:last-child{border:0}.toggle input{width:auto;transform:scale(1.35)}
+.action,.decision{background:var(--p2);border:1px solid var(--line);border-radius:12px;padding:13px;min-height:108px}.action h3,.decision strong{font-size:18px;margin:0 0 7px;display:block}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.chip{font-size:12px;border:1px solid #3b507a;border-radius:999px;padding:5px 8px;background:#21304f}
+.buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}button{border:0;border-radius:10px;padding:10px 12px;font-weight:800;cursor:pointer;background:var(--a);color:#07101f}button.sec{background:#263654;color:var(--tx);border:1px solid var(--line)}button.good{background:var(--ok)}button.warn{background:var(--w)}button.bad{background:var(--bad)}button.purple{background:var(--purple)}button:disabled{opacity:.4}
+.sm{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.sm div{padding:11px 6px;text-align:center;border:1px solid var(--line);border-radius:10px;background:var(--p2);color:var(--mut);font-size:12px;font-weight:900}.sm .active{background:var(--a);color:#07101f}
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:9px}.metric{background:var(--p2);border:1px solid var(--line);border-radius:11px;padding:12px}.metric b{font-size:24px}.metric span{display:block;color:var(--mut);font-size:12px;margin-top:4px}
+.log{display:grid;grid-template-columns:90px 105px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #30415f88;font-size:13px}.logtime{color:var(--mut)}#timeline{max-height:340px;overflow:auto}.note{font-size:13px;color:#ffe5a0;background:#ffc85712;border:1px solid #ffc85744;border-radius:10px;padding:11px;margin-top:12px}
+.footer{text-align:center;color:var(--mut);font-size:12px;padding:18px}
+@media(max-width:900px){.hero,.grid3,.grid2{grid-template-columns:1fr}.arch{grid-template-columns:1fr}.arrow{transform:rotate(90deg);text-align:center}.metrics{grid-template-columns:1fr 1fr}.sm{grid-template-columns:1fr 1fr}.hero h1{font-size:36px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<section class="hero">
+<div class="card"><div class="ey">PRE-EXECUTION RESPONSIBILITY LAYER</div><h1>PRIME-RL Demonstrator</h1>
+<div class="sub">A deterministic, model-agnostic governance layer that separates an autonomous system's capability to act from its authority to execute.</div>
+<div class="rule"><b>Core rule:</b> If valid responsibility cannot be resolved before execution, execution is not admissible.</div></div>
+<div class="card"><div class="small">Current governance state</div><p><span id="state" class="state idle"><span class="dot"></span><span id="stateText">IDLE</span></span></p><div id="stateInfo" class="small">Load a robotic action and evaluate it.</div></div>
+</section>
+
+<section class="card"><h2>Architectural Positioning</h2><div class="arch">
+<div class="box"><b>Planning Layer</b><div class="small">Perception, inference, task planning</div></div><div class="arrow">→</div>
+<div class="box gate"><b>PRIME-RL Gate</b><div class="small">Responsibility, authority, scope, validity</div></div><div class="arrow">→</div>
+<div class="box"><b>Actuation Layer</b><div class="small">Physical execution by the robot</div></div></div></section>
+
+<section class="grid3">
+<div class="card"><h2>Scenario</h2><div class="field"><label>Deployment environment</label><select id="scenario"></select></div>
+<div id="action" class="action"><div class="small">Press “Load Next Action” to begin.</div></div>
+<div class="buttons"><button id="next">Load Next Action</button><button class="sec" id="reset">Reset</button></div></div>
+
+<div class="card"><h2>Responsibility Context</h2>
+<div class="field"><label>Responsibility holder</label><input id="holder" value="Shift Supervisor"></div>
+<div class="field"><label>Authorized role</label><select id="role"><option>Shift Supervisor</option><option>Safety Officer</option><option>Clinical Supervisor</option><option>Facility Manager</option><option>Legal Authority</option></select></div>
+<div class="field"><label>Authorized action scope</label><select id="scope"><option value="routine">Routine</option><option value="restricted">Restricted</option><option value="critical">Critical</option></select></div>
+<div class="field"><label>Authorization validity, minutes</label><input id="ttl" type="number" min="0" value="60"></div></div>
+
+<div class="card"><h2>Live Governance Conditions</h2>
+<div class="toggle"><div><b>Authority assigned</b><div class="small">A responsibility holder exists</div></div><input id="assigned" type="checkbox" checked></div>
+<div class="toggle"><div><b>Authority valid</b><div class="small">Current and not revoked</div></div><input id="valid" type="checkbox" checked></div>
+<div class="toggle"><div><b>Scope matches</b><div class="small">Action is inside authority scope</div></div><input id="match" type="checkbox" checked></div>
+<div class="toggle"><div><b>Context stable</b><div class="small">No material context drift</div></div><input id="stable" type="checkbox" checked></div>
+<div class="toggle"><div><b>Safe suspension possible</b><div class="small">Robot can pause safely</div></div><input id="safe" type="checkbox" checked></div>
+</div></section>
+
+<section class="grid2">
+<div class="card"><h2>Deterministic Gate Decision</h2><div id="decision" class="decision"><strong>Not evaluated</strong><div class="small">Run the gate to determine whether execution is admissible.</div></div>
+<div class="buttons"><button id="evaluate">Evaluate Proposed Action</button><button class="warn" id="drift">Inject Context Drift</button><button class="bad" id="revoke">Revoke Authority</button></div>
+<div class="buttons"><button class="good" id="approve" disabled>Accept Responsibility and Resume</button><button class="purple" id="modify" disabled>Modify Scope</button><button class="bad" id="deny" disabled>Reject and Terminate</button></div></div>
+<div class="card"><h2>Governance State Machine</h2><div class="sm"><div data-s="IDLE">IDLE</div><div data-s="EXECUTE">EXECUTE</div><div data-s="PAUSE">PAUSE</div><div data-s="ESCALATE">ESCALATE</div><div data-s="TERMINATE">TERMINATE</div></div>
+<div class="note">PRIME-RL does not decide whether the action is intelligent or optimal. It verifies whether accountable execution is structurally permitted.</div></div>
+</section>
+
+<section class="card"><h2>Evaluation Metrics</h2><div class="metrics">
+<div class="metric"><b id="mp">0</b><span>Actions proposed</span></div><div class="metric"><b id="me">0</b><span>Actions executed</span></div>
+<div class="metric"><b id="mg">0</b><span>Actions gated</span></div><div class="metric"><b id="mh">0</b><span>Human escalations</span></div>
+<div class="metric"><b id="mt">0</b><span>Actions terminated</span></div></div></section>
+
+<section class="card" style="margin-top:16px"><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><h2>Governance Audit Trail</h2>
+<div class="buttons" style="margin:0"><button class="sec" id="json">Export JSON</button><button class="sec" id="csv">Export CSV</button><button class="sec" id="clear">Clear Log</button></div></div><div id="timeline"></div></section>
+<div class="footer">PRIME-RL software demonstrator. Concept owner: Maria Kollia.</div>
+</div>
+<script>
+const S={
+warehouse:{name:"Autonomous Warehouse Robot",holder:"Shift Supervisor",role:"Shift Supervisor",a:[
+{t:"Transport sealed package to Zone B",s:"routine",r:"Low",c:"Normal mapped route",d:"Routine movement through an authorized warehouse corridor."},
+{t:"Enter temporarily restricted aisle",s:"restricted",r:"Medium",c:"Maintenance crew present",d:"The route remains possible, but the authorization context changed."},
+{t:"Move damaged chemical container",s:"critical",r:"High",c:"Leak suspected",d:"The robot can move it, but execution requires designated safety authority."}]},
+hospital:{name:"Hospital Delivery Robot",holder:"Clinical Supervisor",role:"Clinical Supervisor",a:[
+{t:"Deliver sealed supplies to Ward 3",s:"routine",r:"Low",c:"Verified destination",d:"Routine hospital logistics under a valid scope."},
+{t:"Deliver medication after patient transfer",s:"restricted",r:"Medium",c:"Patient location changed",d:"The original authorization may no longer fit the current patient context."},
+{t:"Enter isolation room during protocol change",s:"critical",r:"High",c:"Infection-control status changed",d:"Execution requires explicit responsibility under the updated protocol."}]},
+factory:{name:"Industrial Robotic Arm",holder:"Safety Officer",role:"Safety Officer",a:[
+{t:"Place standard component on conveyor",s:"routine",r:"Low",c:"Normal production state",d:"Repetitive actuation inside the approved task envelope."},
+{t:"Continue operation with human inside cell",s:"critical",r:"High",c:"Unexpected human presence",d:"The robot is capable of continuing, but accountable execution is inadmissible."},
+{t:"Handle unclassified replacement part",s:"restricted",r:"Medium",c:"Material identity unresolved",d:"The action exceeds the authorized material-handling scope."}]}
+};
+const $=x=>document.getElementById(x);let sc="warehouse",i=-1,A=null,state="IDLE",M={p:0,e:0,g:0,h:0,t:0},L=[];
+function rank(x){return{routine:1,restricted:2,critical:3}[x]||0}
+function esc(x){return String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function setState(s,info){state=s;$("stateText").textContent=s;$("stateInfo").textContent=info||"";$("state").className="state "+({IDLE:"idle",EXECUTE:"execute",PAUSE:"pause",ESCALATE:"escalate",TERMINATE:"terminate"}[s]||"idle");document.querySelectorAll("[data-s]").forEach(x=>x.classList.toggle("active",x.dataset.s===s))}
+function log(type,msg){L.unshift({time:new Date().toISOString(),state,type,msg});renderLog()}
+function renderLog(){$("timeline").innerHTML=L.length?L.map(x=>`<div class="log"><div class="logtime">${new Date(x.time).toLocaleTimeString()}</div><b>${x.state}</b><div><b>${esc(x.type)}</b><br><span class="small">${esc(x.msg)}</span></div></div>`).join(""):'<div class="small">No governance events recorded.</div>'}
+function metrics(){$("mp").textContent=M.p;$("me").textContent=M.e;$("mg").textContent=M.g;$("mh").textContent=M.h;$("mt").textContent=M.t}
+function loadScenario(k){sc=k;i=-1;A=null;$("holder").value=S[k].holder;$("role").value=S[k].role;$("scope").value="routine";$("ttl").value=60;["assigned","valid","match","stable","safe"].forEach(x=>$(x).checked=true);$("action").innerHTML='<div class="small">Press “Load Next Action” to begin.</div>';$("decision").innerHTML='<strong>Not evaluated</strong><div class="small">Run the gate to determine whether execution is admissible.</div>';toggleButtons(true);setState("IDLE","Scenario initialized.");log("SCENARIO_INITIALIZED",S[k].name)}
+function next(){i=(i+1)%S[sc].a.length;A=S[sc].a[i];M.p++;metrics();$("match").checked=rank($("scope").value)>=rank(A.s);$("stable").checked=i===0;$("action").innerHTML=`<h3>${esc(A.t)}</h3><div class="small">${esc(A.d)}</div><div class="chips"><span class="chip">Required scope: ${A.s}</span><span class="chip">Risk: ${A.r}</span><span class="chip">Context: ${esc(A.c)}</span></div>`;$("decision").innerHTML='<strong>Pending evaluation</strong><div class="small">The action has not crossed the execution gate.</div>';toggleButtons(true);setState("IDLE","A robotic action is awaiting governance evaluation.");log("ACTION_PROPOSED",A.t)}
+function toggleButtons(d){$("approve").disabled=d;$("modify").disabled=d;$("deny").disabled=d}
+function evaluate(){if(!A){alert("Load an action first.");return}let f=[];if(!$("assigned").checked||!$("holder").value.trim())f.push("No explicit responsibility holder.");if(!$("valid").checked||Number($("ttl").value)<=0)f.push("Authority is expired or revoked.");if(!$("match").checked||rank($("scope").value)<rank(A.s))f.push("Authority scope does not cover the action.");if(!$("stable").checked)f.push("Context drift invalidated the authorization.");
+if(f.length&&!$("safe").checked){setState("TERMINATE","Inadmissible action and safe suspension unavailable.");M.t++;metrics();$("decision").innerHTML=`<strong style="color:var(--bad)">TERMINATE</strong><div class="small">${f.join(" ")} Safe suspension is unavailable.</div>`;toggleButtons(true);log("ACTION_TERMINATED",f.join(" "));return}
+if(!f.length){setState("EXECUTE","Accountable execution is admissible.");M.e++;metrics();$("decision").innerHTML='<strong style="color:var(--ok)">EXECUTE</strong><div class="small">Authority is explicit, valid, in scope, and contextually current.</div>';toggleButtons(true);log("EXECUTION_ALLOWED",A.t+" authorized under "+$("holder").value)}
+else{setState("PAUSE","Execution gated because responsibility cannot be resolved.");M.g++;M.h++;metrics();$("decision").innerHTML=`<strong style="color:var(--w)">PAUSE → ESCALATE</strong><div class="small">${f.join(" ")} The action is preserved and routed to human authority.</div>`;toggleButtons(false);log("EXECUTION_GATED",f.join(" "));setTimeout(()=>setState("ESCALATE","Waiting for explicit responsibility acceptance, scope modification, or rejection."),180)}}
+function approve(){if(!A)return;log("RESPONSIBILITY_ACCEPTED",$("holder").value+" requested revalidation; no automatic authorization changes.");setState("PAUSE","Human acceptance recorded. Independent revalidation required before execution.");$("decision").innerHTML='<strong style="color:var(--w)">REVALIDATION REQUIRED</strong><div class="small">Review authority, scope, expiry, context and safety, then run the gate again. Approval alone cannot restore execution.</div>';toggleButtons(true)}
+function modify(){$("scope").value=A.s;$("match").checked=$("assigned").checked=$("valid").checked=$("stable").checked=true;$("ttl").value=30;setState("PAUSE","Authority scope modified. Re-evaluation required.");$("decision").innerHTML='<strong style="color:var(--purple)">SCOPE MODIFIED</strong><div class="small">Run the deterministic gate again.</div>';log("AUTHORITY_SCOPE_MODIFIED","Scope changed to "+A.s)}
+function deny(){setState("TERMINATE","Human authority rejected the proposed action.");M.t++;metrics();$("decision").innerHTML='<strong style="color:var(--bad)">TERMINATE</strong><div class="small">No fallback autonomy is granted.</div>';toggleButtons(true);log("RESPONSIBILITY_REJECTED",$("holder").value+" rejected the action.")}
+function dl(n,c,t){let b=new Blob([c],{type:t}),a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=n;a.click();URL.revokeObjectURL(a.href)}
+$("scenario").innerHTML=Object.entries(S).map(([k,v])=>`<option value="${k}">${v.name}</option>`).join("");
+$("scenario").onchange=e=>loadScenario(e.target.value);$("next").onclick=next;$("reset").onclick=()=>loadScenario(sc);$("evaluate").onclick=evaluate;$("drift").onclick=()=>{$("stable").checked=false;log("CONTEXT_DRIFT_INJECTED","Operational conditions changed after authorization.")};$("revoke").onclick=()=>{$("valid").checked=false;log("AUTHORITY_REVOKED","The authorization was revoked before execution.")};$("approve").onclick=approve;$("modify").onclick=modify;$("deny").onclick=deny;$("clear").onclick=()=>{L=[];renderLog()};$("json").onclick=()=>dl("prime-rl-audit.json",JSON.stringify(L.slice().reverse(),null,2),"application/json");$("csv").onclick=()=>{let r=[["time","state","type","message"],...L.slice().reverse().map(x=>[x.time,x.state,x.type,x.msg])];dl("prime-rl-audit.csv",r.map(x=>x.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n"),"text/csv")};
+loadScenario("warehouse");metrics();renderLog();
+</script></body></html>
