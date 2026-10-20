@@ -19,18 +19,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p gazebo-evidence
-          cat > gazebo-evidence/empty.sdf <<'SDF'
-          <?xml version="1.0"?>
-          <sdf version="1.9">
-            <world name="prime_rl_empty_world">
-              <physics name="default_physics" type="ignored">
-                <max_step_size>0.001</max_step_size>
-                <real_time_factor>1.0</real_time_factor>
-              </physics>
-              <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
-              <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
-            </world>
-          </sdf>
+          printf "%s\n" \
+            '<?xml version="1.0"?>' \
+            '<sdf version="1.9">' \
+            '  <world name="prime_rl_empty_world">' \
+            '    <physics name="default_physics" type="ignored">' \
+            '      <max_step_size>0.001</max_step_size>' \
+            '      <real_time_factor>1.0</real_time_factor>' \
+            '    </physics>' \
+            '    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>' \
+            '    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>' \
+            '  </world>' \
+            '</sdf>' > gazebo-evidence/empty.sdf
           docker run --rm --network host \
             -v "$PWD/gazebo-evidence:/evidence" \
             ros:jazzy-ros-base bash -c '
