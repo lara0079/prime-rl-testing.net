@@ -1,0 +1,408 @@
+name: PRIME-RL v3.69 Gazebo Offline Mission
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  v369-gazebo-mission:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Verify and extract exact v3.69 ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, zipfile
+          p=Path('PRIME_RL_Product_Prototype_v3_69_offline_continuity.zip')
+          if not p.is_file():
+              raise SystemExit('Missing v3.69 ZIP in repository root. Upload it ONLY after changing repository to PRIVATE.')
+          expected='c96ad1bda62108e1fd43e14ac5f0febcafd1bb17045ada90a4ef14d9de6aa112'
+          actual=hashlib.sha256(p.read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit('Wrong v3.69 ZIP SHA256. Expected '+expected+' got '+actual)
+          with zipfile.ZipFile(p) as z:
+              for i in z.infolist():
+                  v=Path(i.filename)
+                  if v.is_absolute() or '..' in v.parts or i.file_size>20_000_000:
+                      raise SystemExit('Unsafe archive entry: '+str(v))
+              z.extractall('prime-src')
+          root=Path('prime-src/PRIME_RL_Product_Prototype')
+          for fn in ('offline_mission_continuity.py','ros2_advisory_node.py','offline_mission_demo.py'):
+              assert (root/fn).is_file(), f'Missing {fn}'
+          Path('v369-evidence').mkdir(exist_ok=True)
+          Path('v369-evidence/version.txt').write_text('v3.69\nsource sha256 '+actual+'\n')
+          print('PASS: exact v3.69 ZIP verified and extracted')
+          PY
+      - name: Run v3.69 offline engine regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd prime-src/PRIME_RL_Product_Prototype
+          python3 -m unittest -v test_offline_mission_continuity 2>&1 | tee ../../v369-evidence/v369-unit-tests.log
+          python3 offline_mission_demo.py --output ../../v369-evidence/v369-local-demo.json
+      - name: Build Gazebo model and offline integration harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > v369-evidence/world.sdf <<'SDF'
+          <?xml version="1.0"?>
+          <sdf version="1.9">
+            <world name="prime_rl_outage_world">
+              <gravity>0 0 0</gravity>
+              <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+              <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+              <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+              <model name="prime_rl_test_robot">
+                <pose>1 0 0 0 0 0</pose>
+                <link name="base_link">
+                  <inertial><mass>1</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+                  <collision name="collision"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></collision>
+                  <visual name="visual"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></visual>
+                </link>
+                <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+                  <topic>/prime_rl_test_robot/live_pose</topic>
+                  <publish_model_pose>true</publish_model_pose>
+                  <publish_link_pose>false</publish_link_pose>
+                  <publish_nested_model_pose>false</publish_nested_model_pose>
+                  <use_pose_vector_msg>false</use_pose_vector_msg>
+                  <static_publisher>false</static_publisher>
+                  <update_frequency>15</update_frequency>
+                </plugin>
+                <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
+                  <topic>/model/prime_rl_test_robot/cmd_vel</topic>
+                  <initial_linear>0 0 0</initial_linear>
+                  <initial_angular>0 0 0</initial_angular>
+                </plugin>
+              </model>
+            </world>
+          </sdf>
+          SDF
+          cat > v369-evidence/supervisor.py <<'PY'
+          import rclpy
+          from rclpy.node import Node
+          from std_msgs.msg import String
+
+          class Supervisor(Node):
+              def __init__(self):
+                  super().__init__('prime_rl_demo_remote_supervisor')
+                  self.pub = self.create_publisher(String, '/prime_rl/remote_heartbeat', 10)
+                  self.timer = self.create_timer(0.2, lambda: self.pub.publish(String(data='supervisor_alive')))
+
+          rclpy.init()
+          node = Supervisor()
+          try:
+              rclpy.spin(node)
+          finally:
+              node.destroy_node()
+              rclpy.shutdown()
+          PY
+          cat > v369-evidence/scenario.py <<'PY'
+          """SIMULATION ONLY: PRIME-RL v3.69 offline signed-intent -> measured Gazebo pose.
+
+          The harness, NOT PRIME-RL, applies velocity commands. Robot is a Gazebo box.
+          Remote supervisor process stops; communication loss is observed via ROS2 DDS heartbeat.
+          This is NOT a physical robot, networking partition, or production actuator gate.
+          """
+          import json
+          import re
+          import subprocess
+          import sys
+          import time
+          import uuid
+          from pathlib import Path
+
+          import rclpy
+          from rclpy.node import Node
+          from std_msgs.msg import String
+
+          from authority import sign
+          from offline_mission_continuity import LocalObservation, OfflineMissionContinuity
+          from ros2_advisory_node import INPUT_TOPIC, OUTPUT_TOPIC
+
+          E = Path('/evidence')
+          MISSION = 'v369-gazebo-mission'
+          KEY = b'PRIME-RL-v369-GAZEBO-ONLY-NOT-A-PRODUCTION-SECRET'
+          POSE_TOPIC = '/prime_rl_test_robot/live_pose'
+          CMD_TOPIC = '/model/prime_rl_test_robot/cmd_vel'
+          POSE_FILE = E / 'live-pose-topic.txt'
+
+
+          def stop(proc):
+              if proc is not None and proc.poll() is None:
+                  proc.terminate()
+                  try:
+                      proc.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      proc.kill()
+                      proc.wait(timeout=5)
+
+
+          def current_pose():
+              try:
+                  text = POSE_FILE.read_text(errors='replace')
+              except FileNotFoundError:
+                  return None
+              if 'prime_rl_test_robot' not in text:
+                  return None
+              # This model emits only model pose messages on its dedicated topic.
+              blocks = re.findall(r'\bposition\s*\{([^{}]*)\}', text, flags=re.S)
+              for block in reversed(blocks):
+                  match = re.search(r'\bx:\s*(-?[0-9.eE+]+)', block)
+                  if match:
+                      return float(match.group(1))
+              return None
+
+
+          def wait_pose(timeout=20):
+              limit = time.monotonic() + timeout
+              while time.monotonic() < limit:
+                  if pose_proc.poll() is not None:
+                      raise AssertionError('Live Gazebo pose listener exited unexpectedly')
+                  x = current_pose()
+                  if x is not None:
+                      return x
+                  time.sleep(0.2)
+              raise AssertionError('No live Gazebo pose; inspect gazebo-server.log and pose-listener-errors.txt')
+
+
+          def velocity(v):
+              command = ['gz', 'topic', '-t', CMD_TOPIC, '-m', 'gz.msgs.Twist',
+                         '-p', f'linear: {{x: {v}}}, angular: {{z: 0.0}}']
+              p = subprocess.run(command, text=True, capture_output=True, timeout=12)
+              if p.returncode:
+                  raise AssertionError('Gazebo velocity publish failed: ' + p.stderr[-1000:])
+
+
+          def drive_bounded(target, *, deadline_seconds=14):
+              """Test-only velocity bridge; observe pose, never pretend a motion succeeded."""
+              deadline = time.monotonic() + deadline_seconds
+              try:
+                  while time.monotonic() < deadline:
+                      x = wait_pose(timeout=3)
+                      gap = target - x
+                      if abs(gap) < 0.04:
+                          break
+                      # Only short, slow, repeatable commands in this simulation box.
+                      velocity(0.12 if gap > 0 else -0.12)
+                      time.sleep(0.16)
+                  else:
+                      raise AssertionError(f'Simulator failed to reach issued target {target}; last x={current_pose()}')
+              finally:
+                  velocity(0.0)
+              time.sleep(0.45)
+              end = wait_pose(timeout=3)
+              if abs(end - target) > 0.08:
+                  raise AssertionError(f'Pose does not confirm intent: expected {target} measured {end}')
+              return end
+
+
+          class Probe(Node):
+              def __init__(self):
+                  super().__init__('prime_rl_v369_local_probe')
+                  self.pub = self.create_publisher(String, INPUT_TOPIC, 10)
+                  self.sub = self.create_subscription(String, OUTPUT_TOPIC, self.on_advice, 10)
+                  self.heart = self.create_subscription(String, '/prime_rl/remote_heartbeat', self.on_heart, 10)
+                  self.last_heart = None
+                  self.responses = {}
+              def on_heart(self, _msg):
+                  self.last_heart = time.monotonic()
+              def on_advice(self, msg):
+                  result = json.loads(msg.data)
+                  if 'request_id' in result:
+                      self.responses[result['request_id']] = result
+              def connected(self):
+                  return self.last_heart is not None and time.monotonic() - self.last_heart < 1.5
+              def spin(self, seconds):
+                  until = time.monotonic() + seconds
+                  while time.monotonic() < until:
+                      rclpy.spin_once(self, timeout_sec=0.10)
+              def wait_connection(self, state, timeout=12):
+                  until = time.monotonic() + timeout
+                  while time.monotonic() < until:
+                      rclpy.spin_once(self, timeout_sec=0.1)
+                      if self.connected() == state:
+                          return
+                  raise AssertionError(f'Supervisor link expected {state}, observed {self.connected()}')
+              def advice(self, phase):
+                  request_id = str(uuid.uuid4())
+                  online = self.connected()
+                  payload = json.dumps({'stamp_seconds':time.time(), 'gnss_quality':0.9,
+                      'odometry_quality':0.9, 'imu_quality':0.9, 'map_freshness':0.9,
+                      'battery_fraction':0.8, 'connected':online})
+                  request = json.dumps({'request_id':request_id, 'telemetry':payload})
+                  deadline = time.monotonic()+12
+                  while time.monotonic() < deadline:
+                      self.pub.publish(String(data=request))
+                      self.spin(0.35)
+                      if request_id in self.responses:
+                          answer = self.responses.pop(request_id)
+                          assert answer.get('advisory_only') is True, answer
+                          return {'phase':phase, 'observed_remote_connected':online,
+                                  'advisory_accepted':answer.get('accepted'),
+                                  'advisory_reason':answer.get('reason')}
+                  raise AssertionError('No live PRIME-RL ROS2 advisory during '+phase)
+
+
+          def observe():
+              # Gazebo x is measured. Confidence and battery are *synthetic test inputs*.
+              now = time.time()
+              return LocalObservation(now-0.05, wait_pose(timeout=4), 0.95, 0.85)
+
+
+          rclpy.init()
+          probe = Probe()
+          pose_proc = subprocess.Popen(['stdbuf','-oL','gz','topic','-e','-t',POSE_TOPIC],
+                                       stdout=open(POSE_FILE,'w'),
+                                       stderr=open(E/'pose-listener-errors.txt','w'))
+          prime = None
+          supervisor = None
+          gate = None
+          report = {'schema':'prime-rl-v369-gazebo-integration-v1',
+                    'scope':'simulation-only bounded signed offline mission gate',
+                    'physical_robot_test': False,
+                    'actual_network_partition': False,
+                    'motion_control':'simulation harness, NOT PRIME-RL',
+                    'confidence_and_battery':'synthetic test values',
+                    'steps':[], 'phases':[], 'result':'FAIL'}
+          try:
+              initial = wait_pose()
+              gate = OfflineMissionContinuity(E/'v369-mission.sqlite', keys={'demo':KEY},
+                             issuer='demo-operator', audience='local-robot', robot_id='gazebo-robot')
+              prime = subprocess.Popen([sys.executable,'-u','/src/ros2_advisory_node.py'],
+                                       stdout=open(E/'prime-node.log','w'),stderr=subprocess.STDOUT)
+              supervisor = subprocess.Popen([sys.executable,'-u','/evidence/supervisor.py'],
+                                            stdout=open(E/'supervisor.log','w'),stderr=subprocess.STDOUT)
+              probe.wait_connection(True)
+              report['phases'].append('remote_supervisor_online')
+              report['ros2_online'] = probe.advice('online')
+
+              # Demo permit is cryptographically signed before the remote supervisor disappears.
+              targets = [round(initial+0.18*i, 3) for i in range(1,4)]
+              now = time.time()
+              token = sign({'schema':'prime-rl-offline-plan-v1', 'kid':'demo',
+                            'iss':'demo-operator', 'aud':'local-robot', 'nbf':now-1,
+                            'exp':now+240, 'nonce':str(uuid.uuid4()),
+                            'permissions':['offline:continue'], 'mission_id':MISSION,
+                            'robot_id':'gazebo-robot',
+                            'plan':[{'step_id':f's{i}','target_x':target}
+                                    for i,target in enumerate(targets,1)],
+                            'offline_limit':100, 'total_limit':0.60, 'step_limit':0.27,
+                            'lower_x':initial-0.25, 'upper_x':initial+0.90,
+                            'min_confidence':0.70,'min_battery':0.30},KEY)
+              staged = gate.stage(token, now=time.time(), connected=True, observation=observe())
+              assert staged['accepted'], staged
+              report['phases'].append('online_preapproval_of_signed_3_segment_plan')
+
+              stop(supervisor)
+              supervisor = None
+              probe.wait_connection(False)
+              report['phases'].append('remote_supervisor_process_stopped_DDS_heartbeat_lost')
+              report['ros2_offline'] = probe.advice('offline')
+              assert report['ros2_offline']['observed_remote_connected'] is False
+              disconnected = gate.disconnect(MISSION, now=time.time(), connected=False, observation=observe())
+              assert disconnected['accepted'], disconnected
+
+              for step_no in range(1,4):
+                  before = observe().x
+                  decision = gate.next_intent(MISSION, now=time.time(), connected=False, observation=observe())
+                  assert decision['accepted'] and decision['advisory_only'], decision
+                  assert decision['action'] == 'bounded_segment'
+                  measured = drive_bounded(decision['target_x'])
+                  observed = observe()
+                  confirmation = gate.confirm(MISSION, intent_id=decision['intent_id'],
+                                              now=time.time(), connected=False, observation=observed)
+                  assert confirmation['accepted'], confirmation
+                  report['steps'].append({'index':step_no,'target_x':decision['target_x'],
+                      'before_x':before,'measured_x':measured,
+                      'confirmed_x':observed.x,'confirmed':True})
+                  assert probe.connected() is False, 'Supervisor heartbeat resumed unexpectedly'
+              assert gate.status(MISSION)['status']=='completed',gate.status(MISSION)
+              report['phases'].append('three_gazebo_measured_segments_confirmed_while_offline')
+
+              velocity(0.0)
+              x0 = wait_pose()
+              probe.spin(1.2)
+              x1 = wait_pose()
+              assert abs(x1-x0)<0.08, 'Robot drifted after mission completion'
+              report['hold_x_before']=x0
+              report['hold_x_after']=x1
+
+              supervisor = subprocess.Popen([sys.executable,'-u','/evidence/supervisor.py'],
+                                            stdout=open(E/'supervisor-restarted.log','w'),stderr=subprocess.STDOUT)
+              probe.wait_connection(True)
+              report['ros2_reconnected'] = probe.advice('reconnected')
+              resumed = gate.reconnect(MISSION, now=time.time())
+              denied = gate.next_intent(MISSION,now=time.time(),connected=True,observation=observe())
+              assert resumed['status']=='needs_revalidation' and denied['accepted'] is False, (resumed,denied)
+              assert gate.status(MISSION)['status']=='needs_revalidation'
+              assert gate.verify_audit() is True
+              report['phases'].append('reconnection_requires_new_authority')
+              report['audit_verified'] = True
+              report['result'] = 'PASS'
+              print('PASS: PRIME-RL v3.69 signed offline intents, measured Gazebo motion for 3 steps, real supervisor process outage, DDS advisory and revalidation', flush=True)
+          except BaseException as exc:
+              report['error'] = repr(exc)
+              raise
+          finally:
+              try: velocity(0.0)
+              except Exception: pass
+              stop(supervisor)
+              stop(prime)
+              stop(pose_proc)
+              if gate is not None: gate.close()
+              probe.destroy_node()
+              rclpy.shutdown()
+              (E/'v369-gazebo-result.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n')
+          PY
+      - name: Execute signed offline mission in ROS2 Gazebo
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+              -v "$PWD/prime-src/PRIME_RL_Product_Prototype:/src:ro" \
+              -v "$PWD/v369-evidence:/evidence" \
+              -e PYTHONPATH=/src ros:jazzy-ros-base bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq > /evidence/install.log 2>&1
+              apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release >> /evidence/install.log 2>&1
+              curl -fsSL https://packages.osrfoundation.org/gazebo.gpg -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list
+              apt-get update -qq >> /evidence/install.log 2>&1
+              apt-get install -y --no-install-recommends gz-harmonic >> /evidence/install.log 2>&1
+              set +u
+              source /opt/ros/jazzy/setup.bash
+              set -u
+              gz sim --versions | tee /evidence/gazebo-version.txt
+              gz sim -s -r /evidence/world.sdf > /evidence/gazebo-server.log 2>&1 &
+              gz_pid=$!
+              trap "kill $gz_pid 2>/dev/null || true" EXIT
+              found=0
+              for i in $(seq 1 30); do
+                  kill -0 "$gz_pid" || { cat /evidence/gazebo-server.log; exit 1; }
+                  if timeout 8 gz service -l 2>/dev/null | grep -q /world/prime_rl_outage_world/scene/info; then found=1; break; fi
+                  sleep 2
+              done
+              [ "$found" -eq 1 ] || { echo "FAIL: Gazebo world not ready"; exit 1; }
+              timeout 165 python3 -u /evidence/scenario.py 2>&1 | tee /evidence/gazebo-scenario.log
+          '
+      - name: Declare simulation evidence limits
+        shell: bash
+        run: |
+          cat > v369-evidence/SCOPE.txt <<'EOF'
+          PASS means: exact v3.69 source ZIP loaded, offline signed intent engine exercised with 3 recorded Gazebo positions under simulated ROS2 supervisor loss, local PRIME-RL advisory node alive, reconnect requires revalidation.
+          The simulator is a velocity controlled box, not a validated real robot. The simulation harness translates advisory intents into Gazebo velocity; PRIME-RL does not directly control actuators.
+          DDS heartbeat loss is due to termination of a remote supervisor process; this is not a physical network partition. Battery/confidence telemetry are synthetic.
+          No real robot, hardware safety, robust localization, secure clock, production key, or hardware actuator authority is proven.
+          EOF
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-v369-gazebo-offline-evidence
+          path: v369-evidence/
+          if-no-files-found: warn
