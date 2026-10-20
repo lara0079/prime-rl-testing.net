@@ -40,7 +40,12 @@ jobs:
               set -u
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y --no-install-recommends ros-jazzy-ros-gz-sim > /evidence/install.log 2>&1
+              apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release > /evidence/install.log 2>&1
+              curl -fsSL https://packages.osrfoundation.org/gazebo.gpg -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list
+              apt-get update -qq >> /evidence/install.log 2>&1
+              apt-get install -y --no-install-recommends gz-harmonic >> /evidence/install.log 2>&1
+              command -v gz | tee /evidence/gz-path.txt
               gz sim --versions | tee /evidence/version.log
               gz sim -s -r /evidence/empty.sdf > /evidence/server.log 2>&1 &
               pid=$!
