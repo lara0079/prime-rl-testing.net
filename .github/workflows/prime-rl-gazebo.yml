@@ -34,11 +34,13 @@ jobs:
           docker run --rm --network host \
             -v "$PWD/gazebo-evidence:/evidence" \
             ros:jazzy-ros-base bash -c '
-              set -euo pipefail
+              set -eo pipefail
+              export AMENT_TRACE_SETUP_FILES="${AMENT_TRACE_SETUP_FILES:-}"
+              source /opt/ros/jazzy/setup.bash
+              set -u
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y --no-install-recommends ros-jazzy-ros-gz-sim > /evidence/install.log 2>&1
-              source /opt/ros/jazzy/setup.bash
               gz sim --versions | tee /evidence/version.log
               gz sim -s -r /evidence/empty.sdf > /evidence/server.log 2>&1 &
               pid=$!
