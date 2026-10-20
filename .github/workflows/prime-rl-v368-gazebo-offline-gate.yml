@@ -1,0 +1,104 @@
+name: PRIME-RL v3.68 Gazebo Offline Gate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-gazebo-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recover pinned PRIME-RL v3.68 from private workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gate-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, re, zipfile, io
+          p=Path('.github/workflows/prime-rl-v368-offline-tests.yml')
+          data=p.read_text()
+          match=re.search(r'^\s*cat > /tmp/prime-rl-v368\.b64 <<\x27BASE64_PAYLOAD\x27\s*\n(.*?)^\s*BASE64_PAYLOAD\s*$',data,re.M|re.S)
+          if not match:
+              raise SystemExit('Pinned v3.68 payload missing: do not silently substitute a version')
+          blob=base64.b64decode(''.join(match.group(1).split()),validate=True)
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              for info in z.infolist():
+                  name=Path(info.filename)
+                  if name.is_absolute() or '..' in name.parts:
+                      raise SystemExit('Unsafe archive entry')
+              z.extractall('prime-src')
+          root=Path('prime-src/PRIME_RL_Product_Prototype')
+          assert (root/'test_offline_product_boundary.py').is_file(), 'Wrong payload/version'
+          Path('gate-evidence/source.txt').write_text('Pinned PRIME-RL v3.68 extracted from committed private workflow\n')
+          PY
+      - name: Execute real PRIME-RL offline boundary regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd prime-src/PRIME_RL_Product_Prototype
+          python3 -m unittest -v test_offline_product_boundary 2>&1 | tee ../../gate-evidence/offline-tests.txt
+      - name: Start headless Gazebo Harmonic and verify simulated robot entity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gate-evidence
+          cat > gate-evidence/world.sdf <<'SDF'
+          <?xml version="1.0"?>
+          <sdf version="1.9">
+            <world name="prime_rl_offline_gate">
+              <gravity>0 0 -9.8</gravity>
+              <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+              <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+              <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+              <model name="prime_rl_test_robot">
+                <pose>0 0 0.5 0 0 0</pose>
+                <link name="base_link">
+                  <inertial><mass>1</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+                  <collision name="collision"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></collision>
+                  <visual name="visual"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></visual>
+                </link>
+              </model>
+            </world>
+          </sdf>
+          docker run --rm --network host -v "$PWD/gate-evidence:/evidence" ros:jazzy-ros-base bash -c '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq > /evidence/install.log 2>&1
+            apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release >> /evidence/install.log 2>&1
+            curl -fsSL https://packages.osrfoundation.org/gazebo.gpg -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list
+            apt-get update -qq >> /evidence/install.log 2>&1
+            apt-get install -y --no-install-recommends gz-harmonic >> /evidence/install.log 2>&1
+            gz sim --versions > /evidence/version.txt
+            gz sim -s -r /evidence/world.sdf > /evidence/server.log 2>&1 &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true" EXIT
+            found=0
+            for i in $(seq 1 20); do
+              kill -0 "$pid" || { cat /evidence/server.log; exit 1; }
+              if timeout 12 gz service -s /world/prime_rl_offline_gate/scene/info --reqtype gz.msgs.Empty --reptype gz.msgs.Scene --timeout 5000 --req "" > /evidence/scene.txt 2>> /evidence/service-errors.txt; then
+                if grep -q "prime_rl_test_robot" /evidence/scene.txt; then found=1; break; fi
+              fi
+              sleep 2
+            done
+            test "$found" = 1 || { echo "FAIL: simulated robot not found" | tee /evidence/gazebo-result.txt; exit 1; }
+            echo "PASS: Gazebo running and robot entity present; motion/ROS2 integration NOT tested" | tee /evidence/gazebo-result.txt
+          '
+      - name: Record scope of evidence
+        if: success()
+        shell: bash
+        run: |
+          cat > gate-evidence/scope.txt <<'EOF'
+          PASS means: pinned PRIME-RL v3.68 Python offline-boundary tests pass AND Gazebo simulated robot entity exists.
+          NOT VERIFIED: live ROS 2 telemetry routed to PRIME-RL; loss of ROS 2 connectivity; mission continuation; robot motion; safe actuator behavior; recovery in simulation.
+          Next acceptance gate: real ROS 2/Gazebo telemetry -> PRIME-RL decision -> controlled simulated action -> disconnect -> measured continued authorized behavior -> reconnect.
+          EOF
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-v368-gazebo-offline-gate-evidence
+          path: gate-evidence/
+          if-no-files-found: warn
