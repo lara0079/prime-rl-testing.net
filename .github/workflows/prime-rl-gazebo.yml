@@ -1,0 +1,71 @@
+name: PRIME-RL Gazebo Harmonic Boot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gazebo-headless:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out private repository
+        uses: actions/checkout@v4
+
+      - name: Launch Gazebo Harmonic headless in ROS 2 Jazzy container
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gazebo-evidence
+          cat > gazebo-evidence/empty.sdf <<'SDF'
+          <?xml version="1.0"?>
+          <sdf version="1.9">
+            <world name="prime_rl_empty_world">
+              <physics name="default_physics" type="ignored">
+                <max_step_size>0.001</max_step_size>
+                <real_time_factor>1.0</real_time_factor>
+              </physics>
+              <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+              <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+            </world>
+          </sdf>
+          docker run --rm --network host \
+            -v "$PWD/gazebo-evidence:/evidence" \
+            ros:jazzy-ros-base bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends ros-jazzy-ros-gz-sim > /evidence/install.log 2>&1
+              source /opt/ros/jazzy/setup.bash
+              gz sim --versions | tee /evidence/version.log
+              gz sim -s -r /evidence/empty.sdf > /evidence/server.log 2>&1 &
+              pid=$!
+              trap "kill $pid 2>/dev/null || true" EXIT
+              sleep 10
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "FAIL: Gazebo server exited early" | tee /evidence/result.txt
+                cat /evidence/server.log
+                exit 1
+              fi
+              if ! timeout 15 gz service -l > /evidence/services.log 2>&1; then
+                echo "FAIL: Gazebo service discovery failed" | tee /evidence/result.txt
+                cat /evidence/server.log
+                exit 1
+              fi
+              if ! grep -q "/world/prime_rl_empty_world/" /evidence/services.log; then
+                echo "FAIL: expected Gazebo world services not found" | tee /evidence/result.txt
+                cat /evidence/services.log
+                exit 1
+              fi
+              echo "PASS: Gazebo Harmonic headless world is running and world services are discoverable" | tee /evidence/result.txt
+            '
+
+      - name: Upload Gazebo evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-gazebo-boot-evidence
+          path: gazebo-evidence/
+          if-no-files-found: warn
