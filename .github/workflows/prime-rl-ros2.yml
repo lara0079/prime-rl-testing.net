@@ -40,6 +40,19 @@ jobs:
         run: |
           set -euo pipefail
           cd prime_rl_ros2_src/PRIME_RL_Product_Prototype
+          # ROS setup.bash uses optional variables that are incompatible with nounset.
+          # Disable nounset only in the isolated container bootstrap, keeping all other guards.
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          script = Path('run_ros2_container_smoke.sh')
+          content = script.read_text()
+          old = "prime-rl-jazzy-smoke:local bash -lc '\n  set -euo pipefail\n  source /opt/ros/jazzy/setup.bash"
+          new = "prime-rl-jazzy-smoke:local bash -lc '\n  set -eo pipefail\n  source /opt/ros/jazzy/setup.bash"
+          if content.count(old) != 1:
+              raise RuntimeError('Unexpected ROS 2 bootstrap: refusing unsafe patch')
+          script.write_text(content.replace(old, new, 1))
+          print('Patched ROS 2 container bootstrap to allow optional AMENT variables')
+          PYFIX
           PRIME_RL_ALLOW_DOCKER=YES bash run_ros2_container_smoke.sh 2>&1 | tee "$GITHUB_WORKSPACE/ros2-dds-smoke.log"
       - name: Upload ROS 2 execution log
         if: always()
