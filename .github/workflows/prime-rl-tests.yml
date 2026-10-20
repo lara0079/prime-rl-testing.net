@@ -7,19 +7,28 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  python-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Check Python environment
+          python-version: '3.12'
+      - name: Check that real PRIME-RL tests exist
+        shell: bash
         run: |
-          python --version
-          python -c "print('PRIME-RL test environment ready')"
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          tests = sorted(p for p in Path('.').rglob('test_*.py') if '.git' not in p.parts)
+          print('Found PRIME-RL test files:', len(tests))
+          for path in tests[:30]:
+              print(' -', path)
+          if not tests:
+              raise SystemExit('BLOCKED: No test_*.py files found. Upload the actual PRIME-RL test suite before running.')
+          PY
+      - name: Run PRIME-RL unit tests
+        run: python -W error::ResourceWarning -m unittest discover -s . -p 'test_*.py' -v
