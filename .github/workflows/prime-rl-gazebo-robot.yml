@@ -1,0 +1,79 @@
+name: PRIME-RL Gazebo Robot Simulation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gazebo-robot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Simulate robot and verify Gazebo telemetry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p robot-evidence
+          cat > robot-evidence/world.sdf <<'SDF'
+          <?xml version="1.0"?>
+          <sdf version="1.9">
+            <world name="prime_rl_robot_world">
+              <gravity>0 0 -9.8</gravity>
+              <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+              <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+              <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+              <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+                <publish_link_pose>true</publish_link_pose>
+                <publish_model_pose>true</publish_model_pose>
+                <publish_nested_model_pose>true</publish_nested_model_pose>
+                <use_pose_vector_msg>false</use_pose_vector_msg>
+                <static_publisher>true</static_publisher>
+                <static_update_frequency>10</static_update_frequency>
+              </plugin>
+              <model name="prime_rl_test_robot">
+                <pose>0 0 0.5 0 0 0</pose>
+                <link name="base_link">
+                  <inertial><mass>1</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+                  <collision name="collision"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></collision>
+                  <visual name="visual"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></visual>
+                </link>
+              </model>
+            </world>
+          </sdf>
+          SDF
+          docker run --rm --network host -v "$PWD/robot-evidence:/evidence" ros:jazzy-ros-base bash -c '
+            set -eo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq > /evidence/install.log 2>&1
+            apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release >> /evidence/install.log 2>&1
+            curl -fsSL https://packages.osrfoundation.org/gazebo.gpg -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list
+            apt-get update -qq >> /evidence/install.log 2>&1
+            apt-get install -y --no-install-recommends gz-harmonic >> /evidence/install.log 2>&1
+            gz sim --versions | tee /evidence/version.txt
+            gz sim -s -r /evidence/world.sdf > /evidence/server.log 2>&1 &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true" EXIT
+            sleep 12
+            kill -0 "$pid" || { cat /evidence/server.log; exit 1; }
+            timeout 20 gz service -l > /evidence/services.txt
+            grep -q "/world/prime_rl_robot_world/" /evidence/services.txt
+            timeout 15 gz topic -l > /evidence/topics.txt
+            grep -q "/world/prime_rl_robot_world/pose" /evidence/topics.txt
+            timeout 20 gz topic -e -t /world/prime_rl_robot_world/pose > /evidence/pose.txt &
+            echo_pid=$!
+            for i in $(seq 1 15); do
+              if grep -q "prime_rl_test_robot" /evidence/pose.txt; then break; fi
+              sleep 1
+            done
+            kill "$echo_pid" 2>/dev/null || true
+            grep -q "prime_rl_test_robot" /evidence/pose.txt || { echo "FAIL: robot pose not observed" | tee /evidence/result.txt; cat /evidence/topics.txt; exit 1; }
+            echo "PASS: robot entity observed on live Gazebo pose topic" | tee /evidence/result.txt
+          '
+      - name: Upload simulation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-gazebo-robot-evidence
+          path: robot-evidence/
+          if-no-files-found: warn
