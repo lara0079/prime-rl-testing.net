@@ -1,0 +1,296 @@
+name: PRIME-RL Gazebo Real DDS Outage FIXED
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gazebo-dds-outage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore pinned PRIME-RL v3.68 from private workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outage-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, io, re, zipfile
+          source = Path('.github/workflows/prime-rl-v368-offline-tests.yml').read_text()
+          match = re.search(r"^\s*cat > /tmp/prime-rl-v368\.b64 <<'BASE64_PAYLOAD'\s*\n(.*?)^\s*BASE64_PAYLOAD\s*$", source, re.M | re.S)
+          if not match:
+              raise SystemExit('Missing pinned v3.68 code; refusing version substitution')
+          blob = base64.b64decode(''.join(match.group(1).split()), validate=True)
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              for entry in z.infolist():
+                  path = Path(entry.filename)
+                  if path.is_absolute() or '..' in path.parts:
+                      raise SystemExit('Unsafe ZIP path')
+              z.extractall('prime-src')
+          assert Path('prime-src/PRIME_RL_Product_Prototype/ros2_advisory_node.py').is_file()
+          Path('outage-evidence/source.txt').write_text('PRIME-RL pinned v3.68, private workflow payload\n')
+          PY
+      - name: Define headless Gazebo movable simulation model
+        shell: bash
+        run: |
+          cat > outage-evidence/world.sdf <<'SDF'
+          <?xml version="1.0"?>
+          <sdf version="1.9">
+            <world name="prime_rl_outage_world">
+              <gravity>0 0 0</gravity>
+              <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+              <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+              <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+              <model name="prime_rl_test_robot">
+                <pose>0 0 0 0 0 0</pose>
+                <link name="base_link">
+                  <inertial><mass>1</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
+                  <collision name="collision"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></collision>
+                  <visual name="visual"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></visual>
+                </link>
+                <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
+                  <topic>/model/prime_rl_test_robot/cmd_vel</topic>
+                  <initial_linear>0 0 0</initial_linear>
+                  <initial_angular>0 0 0</initial_angular>
+                </plugin>
+              </model>
+            </world>
+          </sdf>
+          SDF
+      - name: Write real supervisor process disconnect and live Gazebo pose test
+        shell: bash
+        run: |
+          cat > outage-evidence/supervisor.py <<'PY'
+          import rclpy
+          from rclpy.node import Node
+          from std_msgs.msg import String
+          class Supervisor(Node):
+              def __init__(self):
+                  super().__init__('prime_rl_remote_supervisor')
+                  self.pub = self.create_publisher(String, '/prime_rl/remote_heartbeat', 10)
+                  self.timer = self.create_timer(.2, lambda: self.pub.publish(String(data='supervisor_alive')))
+          rclpy.init()
+          node = Supervisor()
+          try:
+              rclpy.spin(node)
+          finally:
+              node.destroy_node()
+              rclpy.shutdown()
+          PY
+          cat > outage-evidence/scenario.py <<'PY'
+          """Simulation-only diagnostic bridge. Not production motion or actuator authority."""
+          import json, os, re, subprocess, sys, time, uuid
+          from pathlib import Path
+          import rclpy
+          from rclpy.node import Node
+          from std_msgs.msg import String
+          from ros2_advisory_node import INPUT_TOPIC, OUTPUT_TOPIC
+
+          EVIDENCE = Path('/evidence')
+          WORLD = '/world/prime_rl_outage_world/scene/info'
+          CMD = '/model/prime_rl_test_robot/cmd_vel'
+
+          def stop(process):
+              if process is None: return
+              if process.poll() is None:
+                  process.terminate()
+                  try: process.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      process.kill(); process.wait(timeout=5)
+
+          def pose():
+              # Pull actual Gazebo scene state; do not synthesize robot movement.
+              command = ['gz', 'service', '-s', WORLD, '--reqtype', 'gz.msgs.Empty',
+                         '--reptype', 'gz.msgs.Scene', '--timeout', '5000', '--req', '']
+              result = subprocess.run(command, text=True, capture_output=True, timeout=12)
+              if result.returncode:
+                  raise AssertionError('Gazebo scene request failed: ' + result.stderr[-1500:])
+              output = result.stdout
+              start = output.find('model {')
+              while start >= 0:
+                  brace = output.find('{', start)
+                  depth, end = 0, None
+                  for idx in range(brace, len(output)):
+                      if output[idx] == '{': depth += 1
+                      elif output[idx] == '}':
+                          depth -= 1
+                          if depth == 0: end = idx + 1; break
+                  if end is None: break
+                  chunk = output[start:end]
+                  if re.search(r'\bname:\s*"prime_rl_test_robot"', chunk):
+                      # Model pose occurs before nested links in gz.msgs.Scene.
+                      pre_link = chunk.split('link {', 1)[0]
+                      pm = re.search(r'\bpose\s*\{', pre_link)
+                      if not pm:
+                          raise AssertionError('Model pose missing from Gazebo scene')
+                      pose_txt = pre_link[pm.end():]
+                      loc = re.search(r'\bposition\s*\{([^}]*)\}', pose_txt, re.S)
+                      if not loc: return 0.0
+                      x = re.search(r'\bx:\s*(-?[0-9.eE+]+)', loc.group(1))
+                      return float(x.group(1)) if x else 0.0
+                  start = output.find('model {', end)
+              raise AssertionError('Robot not present in live Gazebo scene output')
+
+          def velocity(x):
+              request = f'linear: {{x: {x}}}, angular: {{z: 0.0}}'
+              result = subprocess.run(['gz', 'topic', '-t', CMD, '-m', 'gz.msgs.Twist', '-p', request],
+                                      text=True, capture_output=True, timeout=12)
+              if result.returncode:
+                  raise AssertionError('Gazebo velocity message failed: ' + result.stderr[-1200:])
+
+          class Probe(Node):
+              def __init__(self):
+                  super().__init__('prime_rl_local_outage_probe')
+                  self.input = self.create_publisher(String, INPUT_TOPIC, 10)
+                  self.output = self.create_subscription(String, OUTPUT_TOPIC, self.on_advice, 10)
+                  self.heartbeat = self.create_subscription(String, '/prime_rl/remote_heartbeat', self.on_heartbeat, 10)
+                  self.last_heartbeat = None
+                  self.responses = {}
+              def on_heartbeat(self, _msg): self.last_heartbeat = time.monotonic()
+              def on_advice(self, msg):
+                  response = json.loads(msg.data)
+                  if 'request_id' in response:
+                      self.responses[response['request_id']] = response
+              def connected(self):
+                  return self.last_heartbeat is not None and time.monotonic()-self.last_heartbeat < 1.5
+              def spin_for(self, seconds):
+                  end = time.monotonic() + seconds
+                  while time.monotonic() < end: rclpy.spin_once(self, timeout_sec=.1)
+              def wait_connection(self, expected, timeout=12):
+                  end = time.monotonic()+timeout
+                  while time.monotonic() < end:
+                      rclpy.spin_once(self, timeout_sec=.1)
+                      if self.connected() == expected: return
+                  raise AssertionError(f'Expected supervisor connected={expected}, got {self.connected()}')
+              def advise(self, label):
+                  request_id = str(uuid.uuid4())
+                  connected = self.connected()  # Derived from actual process heartbeats.
+                  payload = json.dumps(dict(stamp_seconds=time.time(),gnss_quality=.9,
+                      odometry_quality=.9,imu_quality=.9,map_freshness=.9,
+                      battery_fraction=.8,connected=connected),allow_nan=False)
+                  envelope = json.dumps(dict(request_id=request_id, telemetry=payload))
+                  end = time.monotonic()+12
+                  while time.monotonic() < end:
+                      self.input.publish(String(data=envelope))
+                      for _ in range(5):
+                          rclpy.spin_once(self,timeout_sec=.12)
+                          if request_id in self.responses:
+                              result = self.responses.pop(request_id)
+                              assert result.get('advisory_only') is True, result
+                              return {'phase':label, 'connected':connected, 'advisory':result}
+                  raise AssertionError('No PRIME-RL DDS advisory during '+label)
+
+          rclpy.init()
+          probe=Probe()
+          supervisor=None
+          prime=None
+          record={'test':'real_supervisor_process_outage_with_gazebo_motion', 'phases':[],
+                  'simulator_only':True, 'physical_robot_test':False}
+          try:
+              initial=pose()
+              prime=subprocess.Popen([sys.executable, '-u', '/src/ros2_advisory_node.py'],
+                                     stdout=open(EVIDENCE/'prime-node.log','w'), stderr=subprocess.STDOUT)
+              supervisor=subprocess.Popen([sys.executable, '-u', '/evidence/supervisor.py'],
+                                          stdout=open(EVIDENCE/'supervisor.log','w'),stderr=subprocess.STDOUT)
+              probe.wait_connection(True)
+              probe.spin_for(1.5)
+              online=probe.advise('supervisor_online')
+              assert online['connected'] is True
+              record['phases'].append(online)
+              # Deliberately ungovened *simulation diagnostic stimulus*; not PRIME authority.
+              velocity(.35)
+              probe.spin_for(3.0)
+              moving=pose()
+              assert moving-initial > .15, f'Gazebo model did not move ({initial} -> {moving})'
+              record['poses']={'initial_x':initial,'moving_x':moving}
+              stop(supervisor);supervisor=None
+              probe.wait_connection(False)
+              offline=probe.advise('real_supervisor_process_terminated')
+              assert offline['connected'] is False, offline
+              assert offline['advisory']['accepted'] is False, 'Offline mission unexpectedly accepted'
+              record['phases'].append(offline)
+              # Sim-only independent stop actuator harness. PRIME output is advisory-only.
+              velocity(0.0)
+              probe.spin_for(1.0)
+              held_start=pose()
+              probe.spin_for(2.0)
+              held_end=pose()
+              assert abs(held_end-held_start) < .12, f'Offline HOLD failed: {held_start} -> {held_end}'
+              record['poses'].update(held_start_x=held_start, held_end_x=held_end)
+              supervisor=subprocess.Popen([sys.executable,'-u','/evidence/supervisor.py'],
+                                          stdout=open(EVIDENCE/'supervisor-restarted.log','w'),stderr=subprocess.STDOUT)
+              probe.wait_connection(True)
+              reconnect=probe.advise('supervisor_restarted_no_new_authority')
+              assert reconnect['connected'] is True
+              assert reconnect['advisory']['accepted'] is False, 'Resumed without authority'
+              record['phases'].append(reconnect)
+              probe.spin_for(1.0)
+              reconnected_x=pose()
+              assert abs(reconnected_x-held_end)<.12, 'Robot moved autonomously on reconnect'
+              record['poses']['reconnected_x']=reconnected_x
+              record['result']='PASS'
+              print('PASS: Gazebo motion measured; real ROS2 supervisor process terminated; local PRIME-RL advisory stayed live; safe hold; reconnect did not grant motion',flush=True)
+          except BaseException as error:
+              record['result']='FAIL'
+              record['error']=repr(error)
+              raise
+          finally:
+              try: velocity(0.0)
+              except Exception: pass
+              stop(supervisor)
+              stop(prime)
+              probe.destroy_node()
+              rclpy.shutdown()
+              (EVIDENCE/'scenario.json').write_text(json.dumps(record,indent=2,sort_keys=True))
+          PY
+      - name: Run Gazebo Harmonic and live ROS 2 advisory during actual supervisor shutdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/prime-src/PRIME_RL_Product_Prototype:/src:ro" \
+            -v "$PWD/outage-evidence:/evidence" \
+            -e PYTHONPATH=/src ros:jazzy-ros-base bash -c '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq > /evidence/install.log 2>&1
+            apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release >> /evidence/install.log 2>&1
+            curl -fsSL https://packages.osrfoundation.org/gazebo.gpg -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] https://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" > /etc/apt/sources.list.d/gazebo-stable.list
+            apt-get update -qq >> /evidence/install.log 2>&1
+            apt-get install -y --no-install-recommends gz-harmonic >> /evidence/install.log 2>&1
+            # ROS 2 environment initialization references possibly unset variables.
+            set +u
+            source /opt/ros/jazzy/setup.bash
+            set -u
+            gz sim --versions | tee /evidence/gazebo-version.txt
+            gz sim -s -r /evidence/world.sdf > /evidence/gazebo-server.log 2>&1 &
+            sim_pid=$!
+            trap "kill $sim_pid 2>/dev/null || true" EXIT
+            for i in $(seq 1 30); do
+              if ! kill -0 "$sim_pid" 2>/dev/null; then cat /evidence/gazebo-server.log; exit 1; fi
+              if timeout 8 gz service -l 2>/dev/null | grep -q /world/prime_rl_outage_world/scene/info; then break; fi
+              sleep 2
+            done
+            python3 -u /evidence/scenario.py 2>&1 | tee /evidence/result.log
+          '
+      - name: Declare evidence scope
+        if: always()
+        shell: bash
+        run: |
+          cat > outage-evidence/scope.txt <<'EOF'
+          This workflow measures actual Gazebo model displacement, ROS2 DDS round trips to the real PRIME-RL v3.68 advisory node, and the termination/restart of a separate ROS2 remote-supervisor process.
+          Loss is the real disappearance of a supervisor process and its DDS heartbeat; this test does NOT cut Ethernet/WiFi/network interfaces or prove isolation across real networks.
+          The robot model is a velocity-controlled simulation box, NOT a wheeled robot with validated dynamics.
+          Test telemetry's sensor quality values are illustrative, not derived from physical sensors; Gazebo pose is measured separately.
+          Motion stimulus and HOLD are imposed by the simulation test harness, not by PRIME-RL; the PRIME-RL output is advisory-only. No token-authorized autonomous navigation, mission continuation during outage, hardware safety certification, or physical actuation has been demonstrated.
+          Next gate: locally signed, bounded offline mission authority with measured end-to-end execution and actuator safety constraints in simulation.
+          EOF
+      - name: Upload outage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-gazebo-dds-outage-evidence
+          path: outage-evidence/
+          if-no-files-found: warn
