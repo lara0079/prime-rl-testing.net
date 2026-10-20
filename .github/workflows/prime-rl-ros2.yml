@@ -1,0 +1,51 @@
+name: PRIME-RL ROS 2 DDS Smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ros2-dds-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+      - name: Extract existing PRIME-RL bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, io, pathlib, zipfile
+          import test_prime_rl_full_suite as suite
+          destination = pathlib.Path('prime_rl_ros2_src').resolve()
+          destination.mkdir()
+          with zipfile.ZipFile(io.BytesIO(base64.b64decode(''.join(suite.BUNDLE)))) as archive:
+              for entry in archive.infolist():
+                  target = (destination / entry.filename).resolve()
+                  if not target.is_relative_to(destination):
+                      raise RuntimeError('Unsafe ZIP path')
+              archive.extractall(destination)
+          root = destination / 'PRIME_RL_Product_Prototype'
+          required = ('Dockerfile.ros2', 'run_ros2_container_smoke.sh', 'package.xml', 'setup.py', 'ros2_advisory_node.py', 'ros2_live_smoke.py')
+          missing = [name for name in required if not (root / name).is_file()]
+          if missing:
+              raise RuntimeError(f'Missing ROS 2 sources: {missing}')
+          print('ROS 2 source bundle extracted and validated')
+          PY
+      - name: Build ROS 2 Jazzy image and run isolated live DDS smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd prime_rl_ros2_src/PRIME_RL_Product_Prototype
+          PRIME_RL_ALLOW_DOCKER=YES bash run_ros2_container_smoke.sh 2>&1 | tee "$GITHUB_WORKSPACE/ros2-dds-smoke.log"
+      - name: Upload ROS 2 execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-ros2-dds-log
+          path: ros2-dds-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
