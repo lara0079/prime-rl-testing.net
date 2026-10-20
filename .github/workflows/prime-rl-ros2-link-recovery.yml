@@ -1,0 +1,97 @@
+name: PRIME-RL ROS2 Link Loss Recovery
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ros2-link-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract pinned PRIME-RL v3.68 from private workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p link-evidence
+          python3 - <<'PY'
+          import base64,io,re,zipfile
+          from pathlib import Path
+          s=Path('.github/workflows/prime-rl-v368-offline-tests.yml').read_text()
+          m=re.search(r"^\s*cat > /tmp/prime-rl-v368\.b64 <<'BASE64_PAYLOAD'\s*\n(.*?)^\s*BASE64_PAYLOAD\s*$",s,re.M|re.S)
+          if not m: raise SystemExit('Pinned v3.68 package missing')
+          b=base64.b64decode(''.join(m.group(1).split()),validate=True)
+          with zipfile.ZipFile(io.BytesIO(b)) as z:
+            for i in z.infolist():
+              p=Path(i.filename)
+              if p.is_absolute() or '..' in p.parts: raise SystemExit('Unsafe zip entry')
+            z.extractall('prime-src')
+          assert Path('prime-src/PRIME_RL_Product_Prototype/ros2_advisory_node.py').is_file()
+          PY
+      - name: Write ROS2 DDS disconnect and reconnect test
+        shell: bash
+        run: |
+          cat > link-evidence/dds_test.py <<'PY'
+          import json,subprocess,sys,time
+          import rclpy
+          from rclpy.node import Node
+          from std_msgs.msg import String
+          from ros2_advisory_node import INPUT_TOPIC,OUTPUT_TOPIC
+          class Probe(Node):
+              def __init__(self):
+                  super().__init__('prime_rl_link_probe')
+                  self.pub=self.create_publisher(String,INPUT_TOPIC,10)
+                  self.sub=self.create_subscription(String,OUTPUT_TOPIC,self.receive,10)
+                  self.results=[]
+              def receive(self,msg):
+                  self.results.append(json.loads(msg.data))
+              def send(self,connected):
+                  msg=String()
+                  msg.data=json.dumps(dict(stamp_seconds=time.time(),gnss_quality=.9,odometry_quality=.9,imu_quality=.9,map_freshness=.9,battery_fraction=.8,connected=connected))
+                  self.pub.publish(msg)
+          def wait(probe,count,seconds=12):
+              until=time.monotonic()+seconds
+              while time.monotonic()<until:
+                  rclpy.spin_once(probe,timeout_sec=.2)
+                  if len(probe.results)>=count:return probe.results[-1]
+              raise AssertionError(f'No advisory for message {count}; received {len(probe.results)}')
+          rclpy.init()
+          probe=Probe()
+          process=subprocess.Popen([sys.executable,'-u','/src/ros2_advisory_node.py'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+          try:
+              time.sleep(3)
+              assert process.poll() is None,'PRIME-RL node exited unexpectedly'
+              for i,connected in enumerate((True,False,False,True),start=1):
+                  probe.send(connected)
+                  response=wait(probe,i)
+                  assert response.get('advisory_only') is True,response
+                  print(json.dumps({'phase':['connected','link_loss','offline_repeat','reconnected'][i-1],'connected':connected,'advisory':response},sort_keys=True),flush=True)
+              print('PASS: ROS2 DDS telemetry -> PRIME-RL advisory responses during simulated link-state transitions')
+          finally:
+              process.terminate()
+              try:process.wait(timeout=5)
+              except subprocess.TimeoutExpired:process.kill()
+              probe.destroy_node()
+              rclpy.shutdown()
+          PY
+      - name: Execute real ROS2 advisory node with link-state transitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host -v "$PWD/prime-src/PRIME_RL_Product_Prototype:/src:ro" -v "$PWD/link-evidence:/evidence" -e PYTHONPATH=/src ros:jazzy-ros-base bash -c 'set -eo pipefail; source /opt/ros/jazzy/setup.bash; python3 /evidence/dds_test.py 2>&1 | tee /evidence/result.log'
+      - name: State evidence limitations
+        if: always()
+        shell: bash
+        run: |
+          cat > link-evidence/scope.txt <<'EOF'
+          This is a real ROS 2 DDS publisher -> PRIME-RL advisory node -> DDS subscriber test.
+          It injects connected=false telemetry and later connected=true; it does NOT cut network transport.
+          It does NOT run Gazebo, move a robot, prove autonomous mission continuation, or authorize actuators.
+          EOF
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prime-rl-ros2-link-recovery-evidence
+          path: link-evidence/
+          if-no-files-found: warn
