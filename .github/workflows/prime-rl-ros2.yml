@@ -53,6 +53,26 @@ jobs:
           script.write_text(content.replace(old, new, 1))
           print('Patched ROS 2 container bootstrap to allow optional AMENT variables')
           PYFIX
+          # v3.67 runtime rejects invalid input but omits diagnostic error_type;
+          # live DDS contract requires it. Patch only the extracted test copy.
+          python3 - <<'PYDIAG'
+          from pathlib import Path
+          p = Path('ros2_advisory_node.py')
+          s = p.read_text()
+          old = "        result['request_id'] = request_id\n        return json.dumps(result, sort_keys=True, allow_nan=False)\n"
+          new = ("        if (result.get('accepted') is False and result.get('reason') == 'invalid_telemetry' "
+                 "and 'error_type' not in result):\n"
+                 "            diagnostic = json.loads(evaluate_payload(envelope['telemetry'], now_seconds=now_seconds))\n"
+                 "            if (diagnostic.get('accepted') is False and diagnostic.get('reason') == 'invalid_telemetry' "
+                 "and isinstance(diagnostic.get('error_type'), str)):\n"
+                 "                result['error_type'] = diagnostic['error_type']\n"
+                 "        result['request_id'] = request_id\n"
+                 "        return json.dumps(result, sort_keys=True, allow_nan=False)\n")
+          if s.count(old) != 1:
+              raise RuntimeError('Unexpected advisory node version; refusing patch')
+          p.write_text(s.replace(old, new, 1))
+          print('Patched diagnostic metadata on isolated test copy')
+          PYDIAG
           PRIME_RL_ALLOW_DOCKER=YES bash run_ros2_container_smoke.sh 2>&1 | tee "$GITHUB_WORKSPACE/ros2-dds-smoke.log"
       - name: Upload ROS 2 execution log
         if: always()
